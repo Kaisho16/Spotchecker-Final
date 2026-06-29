@@ -916,6 +916,15 @@ class SpotCheckApp:
         btn_row.pack()
 
         def _do_print():
+            rates_text = ""
+            try:
+                for vt in db.get_vehicle_types():
+                    if vt["name"] == vehicle_type:
+                        rates_text = f"Rate: {format_currency(vt['base_rate'])} first {vt['base_hours']}hrs, +{format_currency(vt['hourly_rate'])}/hr\n"
+                        break
+            except Exception:
+                pass
+
             text = (
                 "SpotCheck Parking\n"
                 "-----------------\n"
@@ -924,6 +933,7 @@ class SpotCheckApp:
                 f"Plate: {plate}\n"
                 f"Type: {vehicle_type}\n"
                 f"Time: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n"
+                f"{rates_text}"
                 "-----------------\n"
                 "Please keep this ticket.\n"
             )
@@ -1667,34 +1677,7 @@ class SpotCheckApp:
         btn_row = tk.Frame(inner, bg=COLORS["card_bg"])
         btn_row.pack()
 
-        def _do_print():
-            change_line = ""
-            if change_amount > 0:
-                change_line = f"Change: {format_currency(change_amount)}\n"
-            text = (
-                "SpotCheck Parking\n"
-                "-----------------\n"
-                "PAYMENT RECEIPT\n"
-                f"Ticket ID: {receipt['ticket_id']}\n"
-                f"Plate: {receipt['plate_no']}\n"
-                f"Type: {receipt['type_name']}\n"
-                f"Entry: {receipt['entry_time']}\n"
-                f"Duration: {format_elapsed(receipt['hours_elapsed'])}\n"
-                f"Payment: {receipt['payment_method']}\n"
-                "-----------------\n"
-                f"TOTAL PAID: {format_currency(receipt['total_fee'])}\n"
-                + change_line +
-                "-----------------\n"
-                "Thank you!\n"
-            )
-            if print_receipt_raw(text):
-                popup.destroy()
 
-        StyledButton(
-            btn_row, text="  🖨️ Print & Done  ",
-            color_key="btn_primary", hover_key="btn_primary_hover",
-            command=_do_print,
-        ).pack(side="left", padx=(0, 10))
 
         StyledButton(
             btn_row, text="  Done  ",
