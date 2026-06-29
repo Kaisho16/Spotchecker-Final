@@ -54,6 +54,16 @@ def initialize_database() -> None:
 
     cur.execute(
         """
+        CREATE TABLE IF NOT EXISTS Floor (
+            floor_id INTEGER PRIMARY KEY AUTOINCREMENT,
+            name     TEXT NOT NULL,
+            capacity INTEGER NOT NULL
+        )
+        """
+    )
+
+    cur.execute(
+        """
         CREATE TABLE IF NOT EXISTS Settings (
             id              INTEGER PRIMARY KEY,
             total_capacity  INTEGER NOT NULL
@@ -67,6 +77,7 @@ def initialize_database() -> None:
             ticket_id   TEXT     PRIMARY KEY,
             plate_no    TEXT     NOT NULL,
             type_id     INTEGER  NOT NULL REFERENCES VehicleType(type_id),
+            floor_id    INTEGER  REFERENCES Floor(floor_id),
             entry_time  DATETIME NOT NULL,
             status      TEXT     NOT NULL DEFAULT 'Active',
             void_reason TEXT
@@ -93,6 +104,18 @@ def initialize_database() -> None:
     
     if "void_time" not in columns:
         cur.execute("ALTER TABLE Ticket ADD COLUMN void_time DATETIME")
+
+    # ---- Seed Floor (Migration) ----
+    cur.execute("SELECT COUNT(*) AS cnt FROM Floor")
+    if cur.fetchone()["cnt"] == 0:
+        cur.execute("SELECT total_capacity FROM Settings WHERE id = 1")
+        row = cur.fetchone()
+        cap = row["total_capacity"] if row else 50
+        cur.execute("INSERT INTO Floor (name, capacity) VALUES (?, ?)", ("Floor 1", cap))
+
+    if "floor_id" not in columns:
+        cur.execute("ALTER TABLE Ticket ADD COLUMN floor_id INTEGER REFERENCES Floor(floor_id)")
+        cur.execute("UPDATE Ticket SET floor_id = 1 WHERE floor_id IS NULL")
 
     settings_cols = [row["name"] for row in cur.execute("PRAGMA table_info(Settings)")]
     if "parking_name" not in settings_cols:
@@ -148,10 +171,24 @@ def get_vehicle_types() -> list[dict]:
     conn.close()
     return [dict(r) for r in rows]
 
+def add_vehicle_type(type_name: str, hourly_rate: float) -> None:
+    """Add a new vehicle type."""
+    conn = get_connection()
+    conn.execute("INSERT INTO VehicleType (type_name, hourly_rate) VALUES (?, ?)", (type_name, hourly_rate))
+    conn.commit()
+    conn.close()
+
 def update_vehicle_type(type_id: int, hourly_rate: float) -> None:
     """Update the hourly rate for a specific vehicle type."""
     conn = get_connection()
     conn.execute("UPDATE VehicleType SET hourly_rate = ? WHERE type_id = ?", (hourly_rate, type_id))
+    conn.commit()
+    conn.close()
+
+def remove_vehicle_type(type_id: int) -> None:
+    """Remove a vehicle type."""
+    conn = get_connection()
+    conn.execute("DELETE FROM VehicleType WHERE type_id = ?", (type_id,))
     conn.commit()
     conn.close()
 
@@ -161,27 +198,53 @@ def update_vehicle_type(type_id: int, hourly_rate: float) -> None:
 # ---------------------------------------------------------------------------
 
 def get_total_capacity() -> int:
-    """Return the total parking capacity from Settings (row id=1)."""
+    """Return the total parking capacity summed from Floor table."""
     conn = get_connection()
     row = conn.execute(
-        "SELECT total_capacity FROM Settings WHERE id = 1"
+        "SELECT SUM(capacity) AS total_capacity FROM Floor"
     ).fetchone()
     conn.close()
-    return row["total_capacity"]
+    return row["total_capacity"] or 0
+
+def get_floors() -> list[dict]:
+    """Return all floors and their capacities."""
+    conn = get_connection()
+    rows = conn.execute("SELECT * FROM Floor ORDER BY floor_id ASC").fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
+
+def add_floor(name: str, capacity: int) -> None:
+    conn = get_connection()
+    conn.execute("INSERT INTO Floor (name, capacity) VALUES (?, ?)", (name, capacity))
+    conn.commit()
+    conn.close()
+
+def update_floor_capacity(floor_id: int, capacity: int) -> None:
+    conn = get_connection()
+    conn.execute("UPDATE Floor SET capacity = ? WHERE floor_id = ?", (capacity, floor_id))
+    conn.commit()
+    conn.close()
+
+def remove_floor(floor_id: int) -> None:
+    conn = get_connection()
+    conn.execute("DELETE FROM Floor WHERE floor_id = ?", (floor_id,))
+    conn.commit()
+    conn.close()
 
 def get_settings() -> dict:
-    """Return all settings."""
+    """Retrieve global system settings."""
     conn = get_connection()
-    row = conn.execute("SELECT total_capacity, parking_name, long_stay_threshold, lost_ticket_fee, overnight_fee FROM Settings WHERE id = 1").fetchone()
+    row = conn.execute("SELECT total_capacity, parking_name, long_stay_threshold, lost_ticket_fee FROM Settings WHERE id = 1").fetchone()
     conn.close()
     return dict(row) if row else {}
 
-def update_settings(total_capacity: int, parking_name: str, long_stay_threshold: int, lost_ticket_fee: float, overnight_fee: float) -> None:
-    """Update settings in the database."""
+def update_settings(total_capacity: int, parking_name: str, long_stay_threshold: int, lost_ticket_fee: float) -> None:
+    """Update global system settings."""
     conn = get_connection()
-    conn.execute(
-        "UPDATE Settings SET total_capacity = ?, parking_name = ?, long_stay_threshold = ?, lost_ticket_fee = ?, overnight_fee = ? WHERE id = 1",
-        (total_capacity, parking_name, long_stay_threshold, lost_ticket_fee, overnight_fee)
+    cur = conn.cursor()
+    cur.execute(
+        "UPDATE Settings SET total_capacity = ?, parking_name = ?, long_stay_threshold = ?, lost_ticket_fee = ? WHERE id = 1",
+        (total_capacity, parking_name, long_stay_threshold, lost_ticket_fee)
     )
     conn.commit()
     conn.close()
@@ -193,14 +256,31 @@ def get_available_slots() -> int:
     row = conn.execute(
         """
         SELECT
-            (SELECT total_capacity FROM Settings WHERE id = 1)
+            (SELECT SUM(capacity) FROM Floor)
             -
             (SELECT COUNT(*) FROM Ticket WHERE status = 'Active')
         AS available
         """
     ).fetchone()
     conn.close()
-    return row["available"]
+    return row["available"] or 0
+
+def get_available_spots_by_floor() -> list[dict]:
+    """Return available spots for each floor."""
+    conn = get_connection()
+    rows = conn.execute(
+        """
+        SELECT 
+            f.floor_id, 
+            f.name, 
+            f.capacity,
+            (f.capacity - (SELECT COUNT(*) FROM Ticket t WHERE t.floor_id = f.floor_id AND t.status = 'Active')) AS available
+        FROM Floor f
+        ORDER BY f.floor_id ASC
+        """
+    ).fetchall()
+    conn.close()
+    return [dict(r) for r in rows]
 
 
 # ---------------------------------------------------------------------------
@@ -220,7 +300,7 @@ def _next_ticket_id(cursor: sqlite3.Cursor) -> str:
 # Entry / exit / void
 # ---------------------------------------------------------------------------
 
-def log_entry(plate_no: str, type_id: int) -> str:
+def log_entry(plate_no: str, type_id: int, floor_id: int) -> str:
     """
     Log a new parking entry.
 
@@ -231,20 +311,28 @@ def log_entry(plate_no: str, type_id: int) -> str:
     if not plate_no:
         raise ValueError("Plate number cannot be empty.")
 
-    if get_available_slots() <= 0:
-        raise ValueError("Parking is full. Cannot log a new entry.")
-
+    # Check capacity for specific floor
     conn = get_connection()
     cur = conn.cursor()
+    floor_row = cur.execute(
+        """
+        SELECT capacity - (SELECT COUNT(*) FROM Ticket WHERE floor_id = ? AND status = 'Active') AS available
+        FROM Floor WHERE floor_id = ?
+        """, (floor_id, floor_id)
+    ).fetchone()
+    if not floor_row or floor_row["available"] <= 0:
+        conn.close()
+        raise ValueError("Selected floor is full. Cannot log a new entry.")
+
     try:
         cur.execute("BEGIN")
         ticket_id = _next_ticket_id(cur)
         cur.execute(
             """
-            INSERT INTO Ticket (ticket_id, plate_no, type_id, entry_time, status)
-            VALUES (?, ?, ?, datetime('now','localtime'), 'Active')
+            INSERT INTO Ticket (ticket_id, plate_no, type_id, floor_id, entry_time, status)
+            VALUES (?, ?, ?, ?, datetime('now','localtime'), 'Active')
             """,
-            (ticket_id, plate_no, type_id),
+            (ticket_id, plate_no, type_id, floor_id),
         )
         conn.commit()
     except Exception:
@@ -419,13 +507,6 @@ def log_exit(ticket_id: str, payment_method: str) -> dict:
         hourly_rate = row["hourly_rate"]
         total_fee = compute_fee(hours_elapsed, hourly_rate)
 
-        # Check for overnight stay (dates differ)
-        settings = get_settings()
-        entry_date = row["entry_time"].split()[0]
-        exit_date = datetime.now().strftime("%Y-%m-%d")
-        if entry_date != exit_date:
-            total_fee += settings.get("overnight_fee", 150.0)
-
         cur.execute(
             "UPDATE Ticket SET status = 'Closed' WHERE ticket_id = ?",
             (ticket_id,),
@@ -501,13 +582,10 @@ def log_lost_ticket_exit(
             )
 
         settings = get_settings()
-        total_fee = settings.get("lost_ticket_fee", 200.0)
-        
-        # Check for overnight stay (dates differ)
-        entry_date = row["entry_time"].split()[0]
-        exit_date = datetime.now().strftime("%Y-%m-%d")
-        if entry_date != exit_date:
-            total_fee += settings.get("overnight_fee", 150.0)
+        hours_elapsed = row["hours_elapsed"]
+        hourly_rate = row["hourly_rate"]
+        parking_fee = compute_fee(hours_elapsed, hourly_rate)
+        total_fee = parking_fee + settings.get("lost_ticket_fee", 200.0)
 
         cur.execute(
             "UPDATE Ticket SET status = 'Closed' WHERE ticket_id = ?",

@@ -1,0 +1,7 @@
+xendit-python
+python-dotenv
+qrcode[pil]
+requests
+pandas
+openpyxl
+tkcalendar

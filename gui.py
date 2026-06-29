@@ -4,8 +4,16 @@ from datetime import datetime
 import database as db
 import qrcode
 from PIL import Image, ImageTk
+from tkcalendar import DateEntry
+import os
+import requests
+import base64
+from dotenv import load_dotenv
 
-def print_receipt_raw(text_content: str):
+load_dotenv()
+XENDIT_API_KEY = os.environ.get("XENDIT_SECRET_KEY", "")
+
+def print_receipt_raw(text_content: str, barcode_data: str = None):
     try:
         import win32print
         printer_name = win32print.GetDefaultPrinter()
@@ -13,8 +21,24 @@ def print_receipt_raw(text_content: str):
         try:
             hJob = win32print.StartDocPrinter(hPrinter, 1, ("SpotCheck Receipt", None, "RAW"))
             win32print.StartPagePrinter(hPrinter)
+            
+            raw_data = text_content.encode("utf-8")
+            
+            # Print barcode if provided
+            if barcode_data:
+                raw_data += (
+                    b"\n" +
+                    b"\x1B\x61\x01" + # Align Center
+                    b"\x1D\x48\x02" + # Text position: below
+                    b"\x1D\x68\x50" + # Barcode height: 80
+                    b"\x1D\x77\x03" + # Barcode width: 3
+                    b"\x1D\x6B\x04" + str(barcode_data).encode("ascii") + b"\x00" + # CODE39
+                    b"\n" +
+                    b"\x1B\x61\x00"   # Align Left
+                )
+                
             # Add padding and basic cut command
-            raw_data = (text_content + "\n\n\n\n\n\x1d\x56\x00").encode("utf-8")
+            raw_data += b"\n\n\n\n\n\x1d\x56\x00"
             win32print.WritePrinter(hPrinter, raw_data)
             win32print.EndPagePrinter(hPrinter)
             win32print.EndDocPrinter(hPrinter)
@@ -56,7 +80,7 @@ COLORS = {
     "full_fg": "#DC2626",
     "table_header_bg": "#F8FAFC",
     "table_row_alt": "#F8FAFC",
-    "table_row_hover": "#EFF6FF",
+    "table_row_hover": "#2563EB",
     "btn_primary": "#3B82F6",
     "btn_primary_hover": "#2563EB",
     "btn_confirm": "#22C55E",
@@ -201,11 +225,6 @@ def export_to_excel(data: list[dict], default_filename: str) -> None:
     if default_filename.endswith(".csv"):
         default_filename = default_filename[:-4] + ".xlsx"
 
-    # Prepend the current date to the filename if not already formatted with dates
-    if "to" not in default_filename:
-        current_date = datetime.datetime.now().strftime("%Y-%m-%d")
-        default_filename = f"{current_date}_{default_filename}"
-
     filepath = filedialog.asksaveasfilename(
         defaultextension=".xlsx",
         filetypes=[("Excel files", "*.xlsx")],
@@ -280,7 +299,9 @@ class SpotCheckApp:
             borderwidth=0,
             relief="flat",
         )
-        style.map("Treeview", background=[("selected", COLORS["table_row_hover"])])
+        style.map("Treeview", 
+                  background=[("selected", COLORS["table_row_hover"])],
+                  foreground=[("selected", "#FFFFFF")])
         style.map("Treeview.Heading", background=[("active", COLORS["table_header_bg"])])
 
     # ─── Layout ───────────────────────────────────────────────────────────
@@ -404,12 +425,12 @@ class SpotCheckApp:
         tk.Label(inner, text="Username", font=FONTS["label"], bg=COLORS["card_bg"], fg=COLORS["text_primary"]).pack(anchor="w")
         user_var = tk.StringVar()
         user_entry = StyledEntry(inner, textvariable=user_var, width=30)
-        user_entry.pack(ipady=6, pady=(0, 16))
+        user_entry.pack(pady=(0, 16))
         
         tk.Label(inner, text="Password", font=FONTS["label"], bg=COLORS["card_bg"], fg=COLORS["text_primary"]).pack(anchor="w")
         pass_var = tk.StringVar()
         pass_entry = StyledEntry(inner, textvariable=pass_var, width=30, show="*")
-        pass_entry.pack(ipady=6, pady=(0, 24))
+        pass_entry.pack(pady=(0, 24))
         
         def _on_login(event=None):
             user = db.verify_login(user_var.get().strip(), pass_var.get())
@@ -522,11 +543,7 @@ class SpotCheckApp:
         )
         self.slots_title_label.pack(anchor="w")
 
-        self.slots_count_label = tk.Label(
-            self.slots_inner, text="0", font=FONTS["counter_number"],
-            bg=COLORS["card_bg"], fg=COLORS["accent_blue"],
-        )
-        self.slots_count_label.pack(anchor="w", pady=(4, 0))
+        self.floor_labels = []
 
         # --- Action buttons card ---
         btn_card = RoundedFrame(top_row)
@@ -626,7 +643,28 @@ class SpotCheckApp:
                 text=f"{count} active ticket{'s' if count != 1 else ''}"
             )
 
-            # Update available slots card — turn red when FULL
+            # Update available slots card (Multi-floor)
+            floor_spots = db.get_available_spots_by_floor()
+            if not hasattr(self, 'floor_labels'):
+                self.floor_labels = []
+            
+            while len(self.floor_labels) < len(floor_spots):
+                lbl = tk.Label(self.slots_inner, font=FONTS["body_bold"], anchor="w")
+                lbl.pack(fill="x", anchor="w")
+                self.floor_labels.append(lbl)
+            while len(self.floor_labels) > len(floor_spots):
+                lbl = self.floor_labels.pop()
+                lbl.destroy()
+
+            for i, f in enumerate(floor_spots):
+                lbl_text = f"{f['name']}: {f['available']}/{f['capacity']}"
+                if f['available'] <= 0:
+                    lbl_text += " (FULL)"
+                bg_col = COLORS["card_bg"] if available > 0 else COLORS["full_bg"]
+                fg_col = COLORS["accent_blue"] if f['available'] > 0 else COLORS["accent_red"]
+                if available <= 0: fg_col = COLORS["full_fg"]
+                self.floor_labels[i].configure(text=lbl_text, bg=bg_col, fg=fg_col)
+
             if available <= 0:
                 self.slots_card.configure(
                     bg=COLORS["full_bg"],
@@ -634,9 +672,6 @@ class SpotCheckApp:
                 )
                 self.slots_inner.configure(bg=COLORS["full_bg"])
                 self.slots_title_label.configure(bg=COLORS["full_bg"], fg=COLORS["full_fg"])
-                self.slots_count_label.configure(
-                    text="FULL", bg=COLORS["full_bg"], fg=COLORS["full_fg"],
-                )
                 # Disable Log Entry button
                 self.entry_btn.configure(
                     state="disabled", text="  🚗  FULL  ",
@@ -649,9 +684,6 @@ class SpotCheckApp:
                 )
                 self.slots_inner.configure(bg=COLORS["card_bg"])
                 self.slots_title_label.configure(bg=COLORS["card_bg"], fg=COLORS["text_secondary"])
-                self.slots_count_label.configure(
-                    text=str(available), bg=COLORS["card_bg"], fg=COLORS["accent_blue"],
-                )
                 self.entry_btn.configure(
                     state="normal", text="  🚗  Log Entry  ",
                     bg=COLORS["accent_green"], cursor="hand2",
@@ -741,13 +773,29 @@ class SpotCheckApp:
             bg=COLORS["card_bg"], fg=COLORS["text_primary"],
         ).pack(anchor="w", pady=(0, 6))
 
+        self.vehicle_types = db.get_vehicle_types()
         type_names = [vt["type_name"] for vt in self.vehicle_types]
         type_var = tk.StringVar(value=type_names[0] if type_names else "")
         type_combo = ttk.Combobox(
             inner, textvariable=type_var, values=type_names,
             state="readonly", font=FONTS["body"], width=34,
         )
-        type_combo.pack(anchor="w", ipady=4, pady=(0, 28))
+        type_combo.pack(anchor="w", ipady=4, pady=(0, 10))
+
+        # Floor
+        tk.Label(
+            inner, text="Floor", font=FONTS["label"],
+            bg=COLORS["card_bg"], fg=COLORS["text_primary"],
+        ).pack(anchor="w", pady=(0, 6))
+
+        floors = db.get_floors()
+        floor_names = [f["name"] for f in floors]
+        floor_var = tk.StringVar(value=floor_names[0] if floor_names else "")
+        floor_combo = ttk.Combobox(
+            inner, textvariable=floor_var, values=floor_names,
+            state="readonly", font=FONTS["body"], width=34,
+        )
+        floor_combo.pack(anchor="w", ipady=4, pady=(0, 28))
 
         # Confirm button
         confirm_btn = StyledButton(
@@ -772,9 +820,19 @@ class SpotCheckApp:
                 messagebox.showwarning("Missing Information", "Please select a vehicle type.", parent=self.root)
                 return
 
+            selected_floor = floor_var.get()
+            floor_id = None
+            for f in floors:
+                if f["name"] == selected_floor:
+                    floor_id = f["floor_id"]
+                    break
+            if floor_id is None:
+                messagebox.showwarning("Missing Information", "Please select a floor.", parent=self.root)
+                return
+
             confirm_btn.configure(state="disabled")
             try:
-                ticket_id = db.log_entry(plate, type_id)
+                ticket_id = db.log_entry(plate, type_id, floor_id)
                 # Show receipt popup
                 self._show_entry_receipt(ticket_id, plate, selected_type)
                 self._show_dashboard()
@@ -869,7 +927,7 @@ class SpotCheckApp:
                 "-----------------\n"
                 "Please keep this ticket.\n"
             )
-            if print_receipt_raw(text):
+            if print_receipt_raw(text, barcode_data=str(ticket_id)):
                 popup.destroy()
 
         StyledButton(
@@ -1160,7 +1218,7 @@ class SpotCheckApp:
 
         pay_var = tk.StringVar(value="Cash")
         pay_combo = ttk.Combobox(
-            inner, textvariable=pay_var, values=["Cash", "GCash"],
+            inner, textvariable=pay_var, values=["Cash", "E-payment"],
             state="readonly", font=FONTS["body"], width=20,
         )
         pay_combo.pack(anchor="w", ipady=4, pady=(0, 12))
@@ -1220,7 +1278,8 @@ class SpotCheckApp:
 
         def _on_confirm_payment():
             change_amount = 0.0
-            if pay_var.get() == "Cash":
+            payment_method = pay_var.get()
+            if payment_method == "Cash":
                 try:
                     tendered = float(cash_var.get())
                 except ValueError:
@@ -1239,6 +1298,12 @@ class SpotCheckApp:
                     )
                     return
                 change_amount = tendered - fee
+            elif payment_method == "E-payment":
+                if not XENDIT_API_KEY:
+                    messagebox.showerror("Error", "Xendit API Key is missing. Check your .env file.", parent=self.root)
+                    return
+                self._process_xendit_payment(ticket, fee)
+                return
 
             confirm_btn.configure(state="disabled")
             try:
@@ -1257,6 +1322,83 @@ class SpotCheckApp:
 
         confirm_btn.configure(command=_on_confirm_payment)
 
+    def _process_xendit_payment(self, ticket, fee):
+        auth_string = XENDIT_API_KEY + ":"
+        headers = {
+            "Authorization": "Basic " + base64.b64encode(auth_string.encode()).decode(),
+            "Content-Type": "application/json"
+        }
+        payload = {
+            "external_id": f"ticket_{ticket['ticket_id']}_{int(datetime.now().timestamp())}",
+            "amount": float(fee),
+            "description": f"Parking Fee for {ticket['plate_no']}",
+            "invoice_duration": 300,
+            "currency": "PHP"
+        }
+        try:
+            res = requests.post("https://api.xendit.co/v2/invoices", json=payload, headers=headers)
+            res.raise_for_status()
+            data = res.json()
+            invoice_url = data.get("invoice_url")
+            invoice_id = data.get("id")
+            self._show_xendit_qr_popup(ticket, fee, invoice_url, invoice_id)
+        except Exception as e:
+            messagebox.showerror("Xendit Error", f"Failed to generate invoice: {e}", parent=self.root)
+
+    def _show_xendit_qr_popup(self, ticket, fee, invoice_url, invoice_id):
+        popup = tk.Toplevel(self.root)
+        popup.title("Scan to Pay")
+        popup.configure(bg=COLORS["card_bg"])
+        popup.resizable(False, False)
+        popup.grab_set()
+
+        inner = tk.Frame(popup, bg=COLORS["card_bg"])
+        inner.pack(padx=32, pady=28)
+        
+        tk.Label(inner, text="Xendit Payment", font=FONTS["card_title"], bg=COLORS["card_bg"]).pack()
+        tk.Label(inner, text=f"Amount: {format_currency(fee)}", font=FONTS["counter_label"], bg=COLORS["card_bg"], fg=COLORS["accent_blue"]).pack(pady=10)
+
+        qr = qrcode.QRCode(version=1, box_size=5, border=1)
+        qr.add_data(invoice_url)
+        qr.make(fit=True)
+        img = qr.make_image(fill_color="black", back_color="white")
+        popup.qr_img = ImageTk.PhotoImage(img)
+        tk.Label(inner, image=popup.qr_img, bg=COLORS["card_bg"]).pack(pady=10)
+        
+        status_label = tk.Label(inner, text="Waiting for payment...", font=FONTS["small"], bg=COLORS["card_bg"], fg=COLORS["accent_orange"])
+        status_label.pack(pady=5)
+
+        def check_status():
+            if not popup.winfo_exists(): return
+            try:
+                auth_string = XENDIT_API_KEY + ":"
+                headers = {"Authorization": "Basic " + base64.b64encode(auth_string.encode()).decode()}
+                res = requests.get(f"https://api.xendit.co/v2/invoices/{invoice_id}", headers=headers)
+                if res.status_code == 200:
+                    status = res.json().get("status")
+                    if status == "PAID":
+                        status_label.config(text="Payment Successful!", fg=COLORS["accent_green"])
+                        popup.after(1000, lambda: finalize_payment())
+                        return
+                    elif status == "EXPIRED":
+                        status_label.config(text="Invoice Expired", fg=COLORS["accent_red"])
+                        return
+            except Exception:
+                pass
+            popup.after(3000, check_status)
+
+        def finalize_payment():
+            popup.destroy()
+            try:
+                receipt = db.log_exit(ticket["ticket_id"], "E-payment")
+                self._show_receipt_popup(receipt, change_amount=0.0)
+                self._show_dashboard()
+            except Exception as e:
+                messagebox.showerror("Error", str(e), parent=self.root)
+        
+        StyledButton(inner, text="Cancel", color_key="btn_gray", hover_key="btn_gray_hover", command=popup.destroy).pack(pady=10)
+        check_status()
+        
         # Back link
         tk.Label(inner, text="", bg=COLORS["card_bg"]).pack(pady=4)
         back_btn = tk.Label(
@@ -1309,7 +1451,7 @@ class SpotCheckApp:
                  font=FONTS["label"], bg=COLORS["card_bg"]).pack(anchor="w")
         pay_var = tk.StringVar(value="Cash")
         ttk.Combobox(inner, textvariable=pay_var,
-                     values=["Cash", "GCash"],
+                     values=["Cash", "E-payment"],
                      state="readonly", font=FONTS["body"],
                      width=20).pack(anchor="w", ipady=4, pady=(0, 20))
 
@@ -1324,6 +1466,9 @@ class SpotCheckApp:
                 return
 
             try:
+                if pay_var.get() == "E-payment":
+                    messagebox.showwarning("Unavailable", "E-payment is not supported for Lost Tickets at this time.", parent=popup)
+                    return
                 receipt = db.log_lost_ticket_exit(plate, pay_var.get())
                 popup.destroy()
                 self._show_receipt_popup(receipt)
@@ -1459,6 +1604,7 @@ class SpotCheckApp:
         back_btn.pack(anchor="w")
         back_btn.bind("<Button-1>", lambda e: self._show_exit())
 
+
     def _show_receipt_popup(self, receipt, change_amount=0.0):
         """Show a styled payment receipt dialog."""
         popup = tk.Toplevel(self.root)
@@ -1468,7 +1614,7 @@ class SpotCheckApp:
         popup.grab_set()
 
         popup.update_idletasks()
-        w, h = 420, 540 if change_amount > 0 else 500
+        w, h = 420, 600 if change_amount > 0 else 560
         x = (popup.winfo_screenwidth() // 2) - (w // 2)
         y = (popup.winfo_screenheight() // 2) - (h // 2)
         popup.geometry(f"{w}x{h}+{x}+{y}")
@@ -1512,10 +1658,10 @@ class SpotCheckApp:
         tk.Label(
             inner, text="TOTAL PAID", font=FONTS["counter_label"],
             bg=COLORS["card_bg"], fg=COLORS["text_secondary"],
-        ).pack()
+        ).pack(pady=(8, 4))
         tk.Label(
             inner, text=format_currency(receipt["total_fee"]),
-            font=FONTS["receipt_total"], bg=COLORS["card_bg"], fg=COLORS["accent_blue"],
+            font=("Helvetica", 24, "bold"), bg=COLORS["card_bg"], fg=COLORS["accent_blue"],
         ).pack(pady=(0, 20))
 
         btn_row = tk.Frame(inner, bg=COLORS["card_bg"])
@@ -1996,7 +2142,7 @@ class SpotCheckApp:
         StyledButton(
             rev_inner, text="  📥  Export Excel  ",
             color_key="btn_gray", hover_key="btn_gray_hover",
-            command=lambda: export_to_excel(summary, "revenue_today.xlsx"),
+            command=lambda: export_to_excel(summary, f"Daily_Revenue_Summary_{datetime.now().strftime('%Y-%m-%d')}.xlsx"),
         ).pack(anchor="w", pady=(8, 0))
 
         # ── Section B: Long-Stay Alerts ──
@@ -2102,7 +2248,7 @@ class SpotCheckApp:
         StyledButton(
             void_inner, text="  📥  Export Excel  ",
             color_key="btn_gray", hover_key="btn_gray_hover",
-            command=lambda: export_to_excel(voided, "voided_today.xlsx"),
+            command=lambda: export_to_excel(voided, f"Voided_Tickets_{datetime.now().strftime('%Y-%m-%d')}.xlsx"),
         ).pack(anchor="w", pady=(8, 0))
 
     # ═══════════════════════════════════════════════════════════════════════
@@ -2284,25 +2430,17 @@ class SpotCheckApp:
         name_var = tk.StringVar(value=settings.get("parking_name", "SpotCheck"))
         StyledEntry(set_inner, textvariable=name_var, width=40).pack(anchor="w", ipady=4, pady=(0, 12))
         
-        tk.Label(set_inner, text="Total Capacity (Slots)", font=FONTS["label"], bg=COLORS["card_bg"]).pack(anchor="w")
-        cap_var = tk.StringVar(value=str(settings.get("total_capacity", 50)))
-        StyledEntry(set_inner, textvariable=cap_var, width=15).pack(anchor="w", ipady=4, pady=(0, 12))
-        
         tk.Label(set_inner, text="Long-Stay Alert Threshold (Hours)", font=FONTS["label"], bg=COLORS["card_bg"]).pack(anchor="w")
         thresh_var = tk.StringVar(value=str(settings.get("long_stay_threshold", 8)))
         StyledEntry(set_inner, textvariable=thresh_var, width=15).pack(anchor="w", ipady=4, pady=(0, 12))
         
         tk.Label(set_inner, text="Lost Ticket Fee (₱)", font=FONTS["label"], bg=COLORS["card_bg"]).pack(anchor="w")
         lost_var = tk.StringVar(value=str(settings.get("lost_ticket_fee", 200.0)))
-        StyledEntry(set_inner, textvariable=lost_var, width=15).pack(anchor="w", ipady=4, pady=(0, 12))
-        
-        tk.Label(set_inner, text="Overnight Fee (₱)", font=FONTS["label"], bg=COLORS["card_bg"]).pack(anchor="w")
-        overnight_var = tk.StringVar(value=str(settings.get("overnight_fee", 150.0)))
-        StyledEntry(set_inner, textvariable=overnight_var, width=15).pack(anchor="w", ipady=4, pady=(0, 16))
+        StyledEntry(set_inner, textvariable=lost_var, width=15).pack(anchor="w", ipady=4, pady=(0, 16))
         
         def _save_settings():
             try:
-                db.update_settings(int(cap_var.get()), name_var.get().strip(), int(thresh_var.get()), float(lost_var.get()), float(overnight_var.get()))
+                db.update_settings(0, name_var.get().strip(), int(thresh_var.get()), float(lost_var.get()))
                 messagebox.showinfo("Success", "Settings saved successfully.")
                 self.header.winfo_children()[0].winfo_children()[1].configure(text=name_var.get().strip())
             except Exception as e:
@@ -2310,32 +2448,103 @@ class SpotCheckApp:
                 
         StyledButton(set_inner, text="Save Settings", command=_save_settings).pack(anchor="w")
 
-        # ── Prices ──
-        price_card = RoundedFrame(wrapper)
-        price_card.pack(fill="x", pady=(0, 18))
-        price_inner = tk.Frame(price_card, bg=COLORS["card_bg"])
-        price_inner.pack(fill="x", padx=28, pady=24)
+        # ── Floors Management ──
+        floor_card = RoundedFrame(wrapper)
+        floor_card.pack(fill="x", pady=(0, 18))
+        floor_inner = tk.Frame(floor_card, bg=COLORS["card_bg"])
+        floor_inner.pack(fill="x", padx=28, pady=24)
         
-        tk.Label(price_inner, text="💰  Pricing", font=FONTS["card_title"], bg=COLORS["card_bg"], fg=COLORS["text_primary"]).pack(anchor="w", pady=(0, 16))
-        tk.Frame(price_inner, bg=COLORS["divider"], height=1).pack(fill="x", pady=(0, 16))
+        tk.Label(floor_inner, text="🏢  Floors & Capacity", font=FONTS["card_title"], bg=COLORS["card_bg"], fg=COLORS["text_primary"]).pack(anchor="w", pady=(0, 16))
+        tk.Frame(floor_inner, bg=COLORS["divider"], height=1).pack(fill="x", pady=(0, 16))
+
+        floor_add_frame = tk.Frame(floor_inner, bg=COLORS["card_bg"])
+        floor_add_frame.pack(fill="x", pady=(0, 16))
+        tk.Label(floor_add_frame, text="Floor Name", bg=COLORS["card_bg"]).grid(row=0, column=0, sticky="w", padx=4)
+        f_name_var = tk.StringVar()
+        StyledEntry(floor_add_frame, textvariable=f_name_var, width=20).grid(row=1, column=0, sticky="w", padx=4)
         
-        price_vars = {}
-        for vt in db.get_vehicle_types():
-            tk.Label(price_inner, text=f"{vt['type_name']} (per hour)", font=FONTS["label"], bg=COLORS["card_bg"]).pack(anchor="w")
-            v = tk.StringVar(value=str(vt['hourly_rate']))
-            price_vars[vt['type_id']] = v
-            StyledEntry(price_inner, textvariable=v, width=15).pack(anchor="w", ipady=4, pady=(0, 12))
-            
-        def _save_prices():
+        tk.Label(floor_add_frame, text="Capacity", bg=COLORS["card_bg"]).grid(row=0, column=1, sticky="w", padx=4)
+        f_cap_var = tk.StringVar()
+        StyledEntry(floor_add_frame, textvariable=f_cap_var, width=10).grid(row=1, column=1, sticky="w", padx=4)
+        
+        def _add_floor():
             try:
-                for t_id, v in price_vars.items():
-                    db.update_vehicle_type(t_id, float(v.get()))
-                self.vehicle_types = db.get_vehicle_types()
-                messagebox.showinfo("Success", "Prices updated successfully.")
+                db.add_floor(f_name_var.get().strip(), int(f_cap_var.get()))
+                f_name_var.set(""); f_cap_var.set("")
+                _refresh_floors()
             except Exception as e:
-                messagebox.showerror("Error", f"Invalid price format: {e}")
+                messagebox.showerror("Error", str(e))
                 
-        StyledButton(price_inner, text="Save Prices", command=_save_prices).pack(anchor="w")
+        StyledButton(floor_add_frame, text="Add Floor", command=_add_floor).grid(row=1, column=2, padx=12)
+
+        f_tree = ttk.Treeview(floor_inner, columns=("id", "name", "capacity"), show="headings", height=4)
+        f_tree.heading("id", text="ID"); f_tree.column("id", width=50)
+        f_tree.heading("name", text="Floor Name"); f_tree.column("name", width=200)
+        f_tree.heading("capacity", text="Capacity"); f_tree.column("capacity", width=100)
+        f_tree.pack(fill="x")
+        
+        def _refresh_floors():
+            for i in f_tree.get_children(): f_tree.delete(i)
+            for f in db.get_floors():
+                f_tree.insert("", "end", values=(f["floor_id"], f["name"], f["capacity"]))
+        _refresh_floors()
+
+        def _delete_floor():
+            sel = f_tree.selection()
+            if sel:
+                db.remove_floor(f_tree.item(sel[0])["values"][0])
+                _refresh_floors()
+        StyledButton(floor_inner, text="Delete Selected Floor", color_key="btn_danger", hover_key="btn_danger_hover", command=_delete_floor).pack(anchor="w", pady=(8, 0))
+
+        # ── Vehicle Types Management ──
+        veh_card = RoundedFrame(wrapper)
+        veh_card.pack(fill="x", pady=(0, 18))
+        veh_inner = tk.Frame(veh_card, bg=COLORS["card_bg"])
+        veh_inner.pack(fill="x", padx=28, pady=24)
+        
+        tk.Label(veh_inner, text="🚗  Vehicle Types & Pricing", font=FONTS["card_title"], bg=COLORS["card_bg"], fg=COLORS["text_primary"]).pack(anchor="w", pady=(0, 16))
+        tk.Frame(veh_inner, bg=COLORS["divider"], height=1).pack(fill="x", pady=(0, 16))
+
+        veh_add_frame = tk.Frame(veh_inner, bg=COLORS["card_bg"])
+        veh_add_frame.pack(fill="x", pady=(0, 16))
+        tk.Label(veh_add_frame, text="Type Name", bg=COLORS["card_bg"]).grid(row=0, column=0, sticky="w", padx=4)
+        v_name_var = tk.StringVar()
+        StyledEntry(veh_add_frame, textvariable=v_name_var, width=20).grid(row=1, column=0, sticky="w", padx=4)
+        
+        tk.Label(veh_add_frame, text="Hourly Rate (₱)", bg=COLORS["card_bg"]).grid(row=0, column=1, sticky="w", padx=4)
+        v_rate_var = tk.StringVar()
+        StyledEntry(veh_add_frame, textvariable=v_rate_var, width=10).grid(row=1, column=1, sticky="w", padx=4)
+        
+        def _add_veh():
+            try:
+                db.add_vehicle_type(v_name_var.get().strip(), float(v_rate_var.get()))
+                v_name_var.set(""); v_rate_var.set("")
+                self.vehicle_types = db.get_vehicle_types()
+                _refresh_vehs()
+            except Exception as e:
+                messagebox.showerror("Error", str(e))
+                
+        StyledButton(veh_add_frame, text="Add Vehicle", command=_add_veh).grid(row=1, column=2, padx=12)
+
+        v_tree = ttk.Treeview(veh_inner, columns=("id", "name", "rate"), show="headings", height=4)
+        v_tree.heading("id", text="ID"); v_tree.column("id", width=50)
+        v_tree.heading("name", text="Vehicle Type"); v_tree.column("name", width=200)
+        v_tree.heading("rate", text="Hourly Rate (₱)"); v_tree.column("rate", width=150)
+        v_tree.pack(fill="x")
+        
+        def _refresh_vehs():
+            for i in v_tree.get_children(): v_tree.delete(i)
+            for v in db.get_vehicle_types():
+                v_tree.insert("", "end", values=(v["type_id"], v["type_name"], v["hourly_rate"]))
+        _refresh_vehs()
+
+        def _delete_veh():
+            sel = v_tree.selection()
+            if sel:
+                db.remove_vehicle_type(v_tree.item(sel[0])["values"][0])
+                self.vehicle_types = db.get_vehicle_types()
+                _refresh_vehs()
+        StyledButton(veh_inner, text="Delete Selected Vehicle", color_key="btn_danger", hover_key="btn_danger_hover", command=_delete_veh).pack(anchor="w", pady=(8, 0))
 
         # ── User Management ──
         user_card = RoundedFrame(wrapper)
@@ -2490,14 +2699,16 @@ class SpotCheckApp:
         tk.Label(filter_row, text="From:", font=FONTS["label"],
                  bg=COLORS["card_bg"]).pack(side="left", padx=(0, 4))
         date_from_var = tk.StringVar(value=today_str)
-        StyledEntry(filter_row, textvariable=date_from_var, width=12).pack(
-            side="left", ipady=4, padx=(0, 12))
+        date_from_entry = DateEntry(filter_row, textvariable=date_from_var, date_pattern='y-mm-dd', width=12, state="readonly", showweeknumbers=False)
+        date_from_entry.pack(side="left", padx=(0, 12))
+        date_from_entry._calendar.unbind('<FocusOut>')
 
         tk.Label(filter_row, text="To:", font=FONTS["label"],
                  bg=COLORS["card_bg"]).pack(side="left", padx=(0, 4))
         date_to_var = tk.StringVar(value=today_str)
-        StyledEntry(filter_row, textvariable=date_to_var, width=12).pack(
-            side="left", ipady=4, padx=(0, 12))
+        date_to_entry = DateEntry(filter_row, textvariable=date_to_var, date_pattern='y-mm-dd', width=12, state="readonly", showweeknumbers=False)
+        date_to_entry.pack(side="left", padx=(0, 12))
+        date_to_entry._calendar.unbind('<FocusOut>')
 
         tk.Label(filter_row, text="Plate:", font=FONTS["label"],
                  bg=COLORS["card_bg"]).pack(side="left", padx=(0, 4))
