@@ -2474,9 +2474,19 @@ class SpotCheckApp:
 
         def _delete_floor():
             sel = f_tree.selection()
-            if sel:
-                db.remove_floor(f_tree.item(sel[0])["values"][0])
+            if not sel:
+                return
+            floor_id = f_tree.item(sel[0])["values"][0]
+            floor_name = f_tree.item(sel[0])["values"][1]
+            if not messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete '{floor_name}'?", parent=self.root):
+                return
+            try:
+                db.remove_floor(floor_id)
                 _refresh_floors()
+            except ValueError as e:
+                messagebox.showerror("Cannot Delete", str(e), parent=self.root)
+            except Exception as e:
+                messagebox.showerror("Error", str(e), parent=self.root)
         StyledButton(floor_inner, text="Delete Selected Floor", color_key="btn_danger", hover_key="btn_danger_hover", command=_delete_floor).pack(anchor="w", pady=(8, 0))
 
         # ── Vehicle Types Management ──
