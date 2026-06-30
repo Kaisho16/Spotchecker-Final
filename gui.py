@@ -13,41 +13,171 @@ from dotenv import load_dotenv
 load_dotenv()
 XENDIT_API_KEY = os.environ.get("XENDIT_SECRET_KEY", "")
 
-def print_receipt_raw(text_content: str, barcode_data: str = None):
+# Known thermal receipt printer keywords (case-insensitive match on printer name)
+_THERMAL_KEYWORDS = [
+    "receipt", "thermal", "pos", "star ", "tm-", "tm20", "tm80",
+    "tsp", "rp-", "rp80", "rp58", "xp-", "srp-", "bixolon",
+    "epson tm", "citizen ct", "esc/pos",
+]
+
+def _is_thermal_printer(name: str) -> bool:
+    """Return True if the printer name suggests it is a thermal receipt printer."""
+    n = name.lower()
+    return any(kw in n for kw in _THERMAL_KEYWORDS)
+
+
+def _print_gdi_image(text_content: str, barcode_data: str = None) -> bool:
+    """Render receipt as a high-res PIL image and send to Windows GDI (any inkjet/laser/WiFi)."""
+    try:
+        import win32print
+        import win32ui
+        import win32con
+        from PIL import Image, ImageDraw, ImageFont, ImageWin
+
+        # ── Build receipt at high resolution so it prints sharp ──────────
+        RECEIPT_W = 1400       # Wide enough for A4 at ~150 effective DPI
+        PADDING   = 60
+        LINE_H    = 48         # Comfortable line height for large font
+        lines     = text_content.strip().splitlines()
+
+        # Use large fonts for clarity on paper
+        try:
+            font_body  = ImageFont.truetype("C:/Windows/Fonts/cour.ttf",   34)
+            font_title = ImageFont.truetype("C:/Windows/Fonts/courbd.ttf", 40)
+        except Exception:
+            font_body = font_title = ImageFont.load_default()
+
+        # Build a large QR code (box_size=12 → ~250–300px)
+        qr_img = None
+        if barcode_data:
+            try:
+                import qrcode as _qr
+                q = _qr.QRCode(version=2, box_size=12, border=3)
+                q.add_data(str(barcode_data))
+                q.make(fit=True)
+                qr_img = q.make_image(fill_color="black", back_color="white").convert("RGB")
+            except Exception:
+                qr_img = None
+
+        qr_h  = (qr_img.height + 80) if qr_img else 0
+        img_h = PADDING * 2 + len(lines) * LINE_H + qr_h + 40
+
+        img  = Image.new("RGB", (RECEIPT_W, img_h), color="white")
+        draw = ImageDraw.Draw(img)
+
+        # Draw a thin top border for style
+        draw.rectangle([PADDING, PADDING - 10, RECEIPT_W - PADDING, PADDING - 6], fill="#1B2A4A")
+
+        y = PADDING + 10
+        for line in lines:
+            is_title = line.startswith("SpotCheck") or "---" in line
+            f = font_title if is_title else font_body
+            # Center dividers; left-align everything else
+            if "---" in line:
+                bbox = draw.textbbox((0, 0), line, font=f)
+                lw = bbox[2] - bbox[0]
+                draw.text(((RECEIPT_W - lw) // 2, y), line, fill="#94A3B8", font=f)
+            else:
+                draw.text((PADDING, y), line, fill="#1B2A4A", font=f)
+            y += LINE_H
+
+        # Paste QR code centered below text
+        if qr_img:
+            y += 20
+            qr_x = (RECEIPT_W - qr_img.width) // 2
+            img.paste(qr_img, (qr_x, y))
+            y += qr_img.height + 16
+            label = f"Scan QR: {barcode_data}"
+            bbox  = draw.textbbox((0, 0), label, font=font_body)
+            lw    = bbox[2] - bbox[0]
+            draw.text(((RECEIPT_W - lw) // 2, y), label, fill="#5A6A7A", font=font_body)
+
+        # Draw a thin bottom border
+        draw.rectangle([PADDING, img_h - PADDING + 6, RECEIPT_W - PADDING, img_h - PADDING + 10], fill="#1B2A4A")
+
+        # ── Send to printer via GDI ───────────────────────────────────────
+        printer_name = win32print.GetDefaultPrinter()
+        hDC = win32ui.CreateDC()
+        hDC.CreatePrinterDC(printer_name)
+        hDC.StartDoc("SpotCheck Receipt")
+        hDC.StartPage()
+
+        page_w = hDC.GetDeviceCaps(win32con.HORZRES)
+        page_h = hDC.GetDeviceCaps(win32con.VERTRES)
+
+        # Scale to full page width (no 1.0 cap — we WANT to fill the page)
+        scale = min(page_w / img.width, page_h / img.height)
+        dst_w = int(img.width  * scale)
+        dst_h = int(img.height * scale)
+
+        # Center horizontally on page
+        x_off = (page_w - dst_w) // 2
+
+        dib = ImageWin.Dib(img.convert("RGB"))
+        dib.draw(hDC.GetHandleOutput(), (x_off, 0, x_off + dst_w, dst_h))
+
+        hDC.EndPage()
+        hDC.EndDoc()
+        hDC.DeleteDC()
+        return True
+
+    except Exception as e:
+        messagebox.showerror(
+            "Printer Error",
+            f"Could not print receipt.\n\n"
+            f"Make sure a printer is set as default in Windows.\n\nDetail: {e}"
+        )
+        return False
+
+
+
+def print_receipt_raw(text_content: str, barcode_data: str = None) -> bool:
+    """
+    Smart printer router:
+      • Thermal printer  (receipt / POS / Star / Epson TM…) → ESC/POS RAW
+      • Regular printer  (Brother, HP, inkjet, laser, PDF…) → GDI image
+    """
     try:
         import win32print
         printer_name = win32print.GetDefaultPrinter()
-        hPrinter = win32print.OpenPrinter(printer_name)
-        try:
-            hJob = win32print.StartDocPrinter(hPrinter, 1, ("SpotCheck Receipt", None, "RAW"))
-            win32print.StartPagePrinter(hPrinter)
-            
-            raw_data = text_content.encode("utf-8")
-            
-            # Print barcode if provided
-            if barcode_data:
-                raw_data += (
-                    b"\n" +
-                    b"\x1B\x61\x01" + # Align Center
-                    b"\x1D\x48\x02" + # Text position: below
-                    b"\x1D\x68\x50" + # Barcode height: 80
-                    b"\x1D\x77\x03" + # Barcode width: 3
-                    b"\x1D\x6B\x04" + str(barcode_data).encode("ascii") + b"\x00" + # CODE39
-                    b"\n" +
-                    b"\x1B\x61\x00"   # Align Left
-                )
-                
-            # Add padding and basic cut command
-            raw_data += b"\n\n\n\n\n\x1d\x56\x00"
-            win32print.WritePrinter(hPrinter, raw_data)
-            win32print.EndPagePrinter(hPrinter)
-            win32print.EndDocPrinter(hPrinter)
-        finally:
-            win32print.ClosePrinter(hPrinter)
-        return True
     except Exception as e:
-        messagebox.showerror("Printer Error", f"Failed to print receipt: {e}")
+        messagebox.showerror("Printer Error", f"No default printer found.\n\n{e}")
         return False
+
+    if _is_thermal_printer(printer_name):
+        # ── ESC/POS RAW path ─────────────────────────────────────────────
+        try:
+            hPrinter = win32print.OpenPrinter(printer_name)
+            try:
+                win32print.StartDocPrinter(hPrinter, 1, ("SpotCheck Receipt", None, "RAW"))
+                win32print.StartPagePrinter(hPrinter)
+
+                raw_data = text_content.encode("utf-8")
+                if barcode_data:
+                    raw_data += (
+                        b"\n"
+                        + b"\x1B\x61\x01"                                      # Center
+                        + b"\x1D\x48\x02"                                      # HRI below
+                        + b"\x1D\x68\x50"                                      # Height 80
+                        + b"\x1D\x77\x03"                                      # Width 3
+                        + b"\x1D\x6B\x04"                                      # CODE39
+                        + str(barcode_data).encode("ascii") + b"\x00"
+                        + b"\n"
+                        + b"\x1B\x61\x00"                                      # Left
+                    )
+                raw_data += b"\n\n\n\n\n\x1d\x56\x00"                         # Feed+cut
+                win32print.WritePrinter(hPrinter, raw_data)
+                win32print.EndPagePrinter(hPrinter)
+                win32print.EndDocPrinter(hPrinter)
+            finally:
+                win32print.ClosePrinter(hPrinter)
+            return True
+        except Exception as e:
+            messagebox.showerror("Printer Error", f"ESC/POS print failed.\n\n{e}")
+            return False
+    else:
+        # ── GDI image path (Brother / HP / any regular printer) ──────────
+        return _print_gdi_image(text_content, barcode_data)
 
 
 # ═══════════════════════════════════════════════════════════════════════════

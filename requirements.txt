@@ -5,3 +5,6 @@ requests
 pandas
 openpyxl
 tkcalendar
+opencv-python
+pyzbar
+pywin32
