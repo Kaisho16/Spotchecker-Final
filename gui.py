@@ -892,6 +892,8 @@ class SpotCheckApp:
         def _upper(*_):
             val = plate_var.get()
             upper_val = val.upper()
+            if len(upper_val) > 7:
+                upper_val = upper_val[:7]
             if val != upper_val:
                 plate_var.set(upper_val)
                 plate_entry.icursor(len(upper_val))
@@ -2639,13 +2641,24 @@ class SpotCheckApp:
         StyledEntry(veh_add_frame, textvariable=v_rate_var, width=10).grid(row=1, column=1, sticky="w", padx=4)
         
         def _add_veh():
+            name = v_name_var.get().strip()
+            rate_str = v_rate_var.get().strip()
+            if not name:
+                messagebox.showerror("Error", "Vehicle type name cannot be empty.", parent=self.root)
+                return
+            if not rate_str:
+                messagebox.showerror("Error", "Hourly rate cannot be empty.", parent=self.root)
+                return
             try:
-                db.add_vehicle_type(v_name_var.get().strip(), float(v_rate_var.get()))
+                rate = float(rate_str)
+                if rate < 0:
+                    raise ValueError("Rate cannot be negative.")
+                db.add_vehicle_type(name, rate)
                 v_name_var.set(""); v_rate_var.set("")
                 self.vehicle_types = db.get_vehicle_types()
                 _refresh_vehs()
             except Exception as e:
-                messagebox.showerror("Error", str(e))
+                messagebox.showerror("Error", str(e), parent=self.root)
                 
         StyledButton(veh_add_frame, text="Add Vehicle", command=_add_veh).grid(row=1, column=2, padx=12)
 
@@ -2694,7 +2707,30 @@ class SpotCheckApp:
                     messagebox.showerror("Cannot Delete", err_msg, parent=self.root)
             except Exception as e:
                 messagebox.showerror("Error", str(e), parent=self.root)
-        StyledButton(veh_inner, text="Delete Selected Vehicle", color_key="btn_danger", hover_key="btn_danger_hover", command=_delete_veh).pack(anchor="w", pady=(8, 0))
+        def _update_veh():
+            sel = v_tree.selection()
+            if not sel:
+                messagebox.showwarning("Select", "Please select a vehicle type to update.", parent=self.root)
+                return
+            veh_id = v_tree.item(sel[0])["values"][0]
+            veh_name = v_tree.item(sel[0])["values"][1]
+            old_rate = v_tree.item(sel[0])["values"][2]
+            
+            from tkinter import simpledialog
+            new_rate = simpledialog.askfloat("Update Rate", f"Enter new hourly rate for {veh_name} (Current: ₱{old_rate}):", parent=self.root, minvalue=0.0)
+            if new_rate is not None:
+                try:
+                    db.update_vehicle_type(veh_id, new_rate)
+                    self.vehicle_types = db.get_vehicle_types()
+                    _refresh_vehs()
+                    messagebox.showinfo("Success", f"Updated {veh_name} rate to ₱{new_rate:.2f}", parent=self.root)
+                except Exception as e:
+                    messagebox.showerror("Error", str(e), parent=self.root)
+
+        btn_frame = tk.Frame(veh_inner, bg=COLORS["card_bg"])
+        btn_frame.pack(anchor="w", pady=(8, 0))
+        StyledButton(btn_frame, text="Update Rate", color_key="btn_primary", hover_key="btn_primary_hover", command=_update_veh).pack(side="left", padx=(0, 10))
+        StyledButton(btn_frame, text="Delete Selected Vehicle", color_key="btn_danger", hover_key="btn_danger_hover", command=_delete_veh).pack(side="left")
 
         # ── User Management ──
         user_card = RoundedFrame(wrapper)
