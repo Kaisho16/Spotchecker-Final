@@ -1,0 +1,20 @@
+# Virtual environment — never push this
+venv/
+.venv/
+env/
+
+# Python compiled files
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyc
+
+# VS Code settings
+.vscode/
+
+# Environment / secrets
+.env
+
+# OS files
+.DS_Store
+Thumbs.db
