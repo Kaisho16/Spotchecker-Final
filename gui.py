@@ -1464,7 +1464,7 @@ class SpotCheckApp:
 
         confirm_btn.configure(command=_on_confirm_payment)
 
-    def _process_xendit_payment(self, ticket, fee):
+    def _process_xendit_payment(self, ticket, fee, is_lost_ticket=False):
         auth_string = XENDIT_API_KEY + ":"
         headers = {
             "Authorization": "Basic " + base64.b64encode(auth_string.encode()).decode(),
@@ -1483,11 +1483,11 @@ class SpotCheckApp:
             data = res.json()
             invoice_url = data.get("invoice_url")
             invoice_id = data.get("id")
-            self._show_xendit_qr_popup(ticket, fee, invoice_url, invoice_id)
+            self._show_xendit_qr_popup(ticket, fee, invoice_url, invoice_id, is_lost_ticket)
         except Exception as e:
             messagebox.showerror("Xendit Error", f"Failed to generate invoice: {e}", parent=self.root)
 
-    def _show_xendit_qr_popup(self, ticket, fee, invoice_url, invoice_id):
+    def _show_xendit_qr_popup(self, ticket, fee, invoice_url, invoice_id, is_lost_ticket=False):
         popup = tk.Toplevel(self.root)
         popup.title("Scan to Pay")
         popup.configure(bg=COLORS["card_bg"])
@@ -1532,7 +1532,10 @@ class SpotCheckApp:
         def finalize_payment():
             popup.destroy()
             try:
-                receipt = db.log_exit(ticket["ticket_id"], "E-payment")
+                if is_lost_ticket:
+                    receipt = db.log_lost_ticket_exit(ticket["plate_no"], "E-payment")
+                else:
+                    receipt = db.log_exit(ticket["ticket_id"], "E-payment")
                 self._show_receipt_popup(receipt, change_amount=0.0)
                 self._show_dashboard()
             except Exception as e:
@@ -1585,6 +1588,8 @@ class SpotCheckApp:
         def _upper(*_):
             v = plate_var.get()
             u = v.upper()
+            if len(u) > 7:
+                u = u[:7]
             if v != u:
                 plate_var.set(u)
         plate_var.trace_add("write", _upper)
@@ -1608,9 +1613,22 @@ class SpotCheckApp:
                 return
 
             try:
+                ticket = db.search_ticket(plate)
+                if not ticket or ticket["status"] != "Active":
+                    raise ValueError(f"No active ticket found for plate {plate}.")
+                
+                settings = db.get_settings()
+                base_fee = db.compute_fee(ticket["hours_elapsed"], ticket["hourly_rate"])
+                total_fee = base_fee + settings.get("lost_ticket_fee", 200.0)
+
                 if pay_var.get() == "E-payment":
-                    messagebox.showwarning("Unavailable", "E-payment is not supported for Lost Tickets at this time.", parent=popup)
+                    if not XENDIT_API_KEY:
+                        messagebox.showerror("Error", "Xendit API Key is missing. Check your .env file.", parent=popup)
+                        return
+                    popup.destroy()
+                    self._process_xendit_payment(ticket, total_fee, is_lost_ticket=True)
                     return
+                
                 receipt = db.log_lost_ticket_exit(plate, pay_var.get())
                 popup.destroy()
                 self._show_receipt_popup(receipt)
@@ -1809,7 +1827,29 @@ class SpotCheckApp:
         btn_row = tk.Frame(inner, bg=COLORS["card_bg"])
         btn_row.pack()
 
+        def _do_print():
+            text = (
+                "SpotCheck Parking\n"
+                "-----------------\n"
+                "EXIT RECEIPT\n"
+                f"Ticket ID: {receipt.get('ticket_id', 'N/A')}\n"
+                f"Plate: {receipt.get('plate_no', 'N/A')}\n"
+                f"Type: {receipt.get('type_name', 'N/A')}\n"
+                f"Entry Time: {receipt.get('entry_time', 'N/A')}\n"
+                f"Duration: {format_elapsed(receipt.get('hours_elapsed', 0))}\n"
+                f"Payment: {receipt.get('payment_method', 'N/A')}\n"
+                f"Total Paid: {format_currency(receipt.get('total_fee', 0))}\n"
+                "-----------------\n"
+                "Thank you for parking with us!\n"
+            )
+            if print_receipt_raw(text, barcode_data=str(receipt.get('ticket_id', ''))):
+                popup.destroy()
 
+        StyledButton(
+            btn_row, text="  🖨️ Print & Done  ",
+            color_key="btn_primary", hover_key="btn_primary_hover",
+            command=_do_print,
+        ).pack(side="left", padx=(0, 10))
 
         StyledButton(
             btn_row, text="  Done  ",
