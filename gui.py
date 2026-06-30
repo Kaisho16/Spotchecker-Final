@@ -2533,10 +2533,37 @@ class SpotCheckApp:
 
         def _delete_veh():
             sel = v_tree.selection()
-            if sel:
-                db.remove_vehicle_type(v_tree.item(sel[0])["values"][0])
+            if not sel:
+                return
+            veh_id = v_tree.item(sel[0])["values"][0]
+            veh_name = v_tree.item(sel[0])["values"][1]
+            if not messagebox.askyesno("Confirm Delete", f"Are you sure you want to delete the vehicle type '{veh_name}'?", parent=self.root):
+                return
+            try:
+                db.remove_vehicle_type(veh_id)
                 self.vehicle_types = db.get_vehicle_types()
                 _refresh_vehs()
+            except ValueError as e:
+                err_msg = str(e)
+                if err_msg.startswith("IN_USE:"):
+                    count = err_msg.split(":")[1]
+                    warning = (
+                        f"WARNING: This vehicle type is associated with {count} historical ticket(s) and payment(s).\n\n"
+                        "Deleting it will PERMANENTLY DELETE all those historical records, which will alter your total revenue history.\n\n"
+                        "Are you absolutely sure you want to FORCE DELETE this vehicle type and all its history?"
+                    )
+                    if messagebox.askyesno("Force Delete Warning", warning, icon='warning', parent=self.root):
+                        try:
+                            db.remove_vehicle_type(veh_id, force=True)
+                            self.vehicle_types = db.get_vehicle_types()
+                            _refresh_vehs()
+                            messagebox.showinfo("Success", f"Vehicle type '{veh_name}' and all associated history have been deleted.", parent=self.root)
+                        except Exception as force_e:
+                            messagebox.showerror("Error", str(force_e), parent=self.root)
+                else:
+                    messagebox.showerror("Cannot Delete", err_msg, parent=self.root)
+            except Exception as e:
+                messagebox.showerror("Error", str(e), parent=self.root)
         StyledButton(veh_inner, text="Delete Selected Vehicle", color_key="btn_danger", hover_key="btn_danger_hover", command=_delete_veh).pack(anchor="w", pady=(8, 0))
 
         # ── User Management ──

@@ -185,12 +185,44 @@ def update_vehicle_type(type_id: int, hourly_rate: float) -> None:
     conn.commit()
     conn.close()
 
-def remove_vehicle_type(type_id: int) -> None:
-    """Remove a vehicle type."""
+def remove_vehicle_type(type_id: int, force: bool = False) -> None:
+    """Remove a vehicle type. Raises ValueError if in use (unless force=True) or if it is the last one."""
     conn = get_connection()
-    conn.execute("DELETE FROM VehicleType WHERE type_id = ?", (type_id,))
-    conn.commit()
-    conn.close()
+    cur = conn.cursor()
+    try:
+        # Prevent deleting the last vehicle type
+        total = cur.execute("SELECT COUNT(*) AS cnt FROM VehicleType").fetchone()
+        if total["cnt"] <= 1:
+            raise ValueError("Cannot delete the last remaining vehicle type.")
+
+        # Check if any tickets use this vehicle type
+        usage = cur.execute(
+            "SELECT COUNT(*) AS cnt FROM Ticket WHERE type_id = ?", 
+            (type_id,)
+        ).fetchone()
+        
+        if usage["cnt"] > 0:
+            if not force:
+                raise ValueError(
+                    f"IN_USE:{usage['cnt']}"  # Special flag so GUI knows it can ask for force deletion
+                )
+            else:
+                # Force delete: Cascading delete on Payments, then Tickets
+                cur.execute(
+                    "DELETE FROM Payment WHERE ticket_id IN (SELECT ticket_id FROM Ticket WHERE type_id = ?)",
+                    (type_id,)
+                )
+                cur.execute("DELETE FROM Ticket WHERE type_id = ?", (type_id,))
+
+        cur.execute("DELETE FROM VehicleType WHERE type_id = ?", (type_id,))
+        conn.commit()
+    except ValueError:
+        raise
+    except Exception:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
